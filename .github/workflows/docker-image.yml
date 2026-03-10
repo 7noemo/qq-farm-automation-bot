@@ -1,9 +1,6 @@
 name: Build and Push Multi-Arch Docker Image
 
 on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
   workflow_call:
     inputs:
       custom_tag:
@@ -44,11 +41,10 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
+            # Always include 'latest' tag
+            type=raw,value=latest,enable=true
+            # Include the custom tag if provided
             type=raw,value=${{ inputs.custom_tag }},enable=${{ inputs.custom_tag != '' }}
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
