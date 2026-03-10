@@ -14,7 +14,8 @@ jobs:
   sync-and-trigger:
     runs-on: ubuntu-latest
     outputs:
-      new_tag: ${{ steps.extract_tag.outputs.new_tag }}
+      should_build: ${{ steps.check.outputs.updates_available }}
+      new_tag: ${{ steps.extract_tag.outputs.new_tag || '' }}
     steps:
       - name: Checkout current repository
         uses: actions/checkout@v4
@@ -42,12 +43,12 @@ jobs:
           REMOTE_SHA=$(git rev-parse upstream/${{ env.UPSTREAM_BRANCH }})
           
           if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
-            echo "Changes detected. Local SHA: $LOCAL_SHA, Remote SHA: $REMOTE_SHA"
+            echo "Changes detected. Proceeding with merge and tag extraction."
             echo "updates_available=true" >> $GITHUB_OUTPUT
           else
-            echo "No changes detected. Exiting early."
-            echo "::notice title=Sync Check::No updates found from upstream repository."
-            exit 0
+            echo "No changes detected. No further action needed."
+            echo "updates_available=false" >> $GITHUB_OUTPUT
+            exit 78
           fi
 
       - name: Merge upstream changes (preferring upstream on conflicts)
@@ -93,13 +94,18 @@ jobs:
 
   trigger-docker-build:
     needs: sync-and-trigger
-    if: always() && needs.sync-and-trigger.result == 'success' && needs.sync-and-trigger.outputs.new_tag != ''
+    if: needs.sync-and-trigger.result == 'success' && needs.sync-and-trigger.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Docker Build Workflow
+        if: needs.sync-and-trigger.outputs.new_tag != ''
         run: |
           curl -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.TOKEN }}" \
             https://api.github.com/repos/${{ github.repository }}/actions/workflows/docker-image.yml/dispatches \
             -d '{"ref":"${{ github.ref_name }}","inputs":{"custom_tag":"${{ needs.sync-and-trigger.outputs.new_tag }}"}}'
+      - name: Log if no tag was available to trigger
+        if: needs.sync-and-trigger.outputs.new_tag == ''
+        run: |
+          echo "Warning: No tag was extracted, so the Docker build workflow was not triggered."
