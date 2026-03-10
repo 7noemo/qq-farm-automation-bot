@@ -1,4 +1,4 @@
-name: Sync Upstream and Trigger Build
+name: Compare Files and Trigger Build
 
 on:
   schedule:
@@ -11,10 +11,10 @@ env:
   LOCAL_BRANCH: main
 
 jobs:
-  sync-and-trigger:
+  compare-and-trigger:
     runs-on: ubuntu-latest
     outputs:
-      should_proceed: ${{ steps.decision.outputs.should_proceed }}
+      should_proceed: ${{ steps.compare_files.outputs.should_proceed }}
       new_tag: ${{ steps.extract_tag.outputs.new_tag || '' }}
     steps:
       - name: Checkout current repository
@@ -28,41 +28,41 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
-      - name: Add upstream remote
+      - name: Clone upstream repository to a temporary directory
         run: |
-          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
-          git remote set-branches upstream '*'
+          git clone --depth 1 --branch ${{ env.UPSTREAM_BRANCH }} "https://github.com/${{ env.UPSTREAM_REPO }}.git" /tmp/upstream_repo
 
-      - name: Fetch upstream changes
-        run: git fetch upstream
-
-      - name: Check for updates and make decision
-        id: decision
+      - name: Compare file contents between local and upstream
+        id: compare_files
         run: |
-          LOCAL_SHA=$(git rev-parse HEAD)
-          REMOTE_SHA=$(git rev-parse upstream/${{ env.UPSTREAM_BRANCH }})
-          
-          if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
-            echo "Changes detected. Proceeding with merge and tag extraction."
-            echo "should_proceed=true" >> $GITHUB_OUTPUT
-          else
-            echo "No changes detected. Stopping here as per optimization."
+          # Use rsync to perform a dry-run comparison of file contents.
+          # This is more accurate than comparing commit SHAs.
+          # It compares actual file content and structure.
+          if rsync -rn --delete --exclude='.git' ./ /tmp/upstream_repo/; then
+            # If rsync reports no differences, no files have changed
+            echo "No file changes detected compared to upstream repository."
             echo "should_proceed=false" >> $GITHUB_OUTPUT
             exit 0
+          else
+            # If rsync reports differences, files have changed
+            echo "File changes detected compared to upstream repository. Proceeding."
+            echo "should_proceed=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Merge upstream changes (preferring upstream on conflicts)
-        if: steps.decision.outputs.should_proceed == 'true'
+      - name: Sync upstream changes into local repository
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
-          git pull -X theirs upstream $UPSTREAM_BRANCH
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git fetch upstream
+          git pull -X theirs upstream ${{ env.UPSTREAM_BRANCH }}
 
       - name: Push merged changes to local main branch
-        if: steps.decision.outputs.should_proceed == 'true'
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: git push origin ${{ env.LOCAL_BRANCH }}
 
       - name: Extract tag from Update.log (root directory)
         id: extract_tag
-        if: steps.decision.outputs.should_proceed == 'true'
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
           LOG_FILE="./Update.log"
           
@@ -87,30 +87,29 @@ jobs:
           fi
           
       - name: Print sync summary
-        if: steps.decision.outputs.should_proceed == 'true'
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
-          echo "Repository synced with upstream using 'theirs' strategy on conflicts."
-          echo "Triggering build with tag: ${{ steps.extract_tag.outputs.new_tag }}"
+          echo "Repository synced with upstream. Triggering build with tag: ${{ steps.extract_tag.outputs.new_tag }}"
 
   trigger-docker-build:
-    needs: sync-and-trigger
-    if: needs.sync-and-trigger.result == 'success' && needs.sync-and-trigger.outputs.should_proceed == 'true'
+    needs: compare-and-trigger
+    if: needs.compare-and-trigger.result == 'success' && needs.compare-and-trigger.outputs.should_proceed == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Docker Build Workflow
-        if: ${{ needs.sync-and-trigger.outputs.new_tag != '' && needs.sync-and-trigger.outputs.new_tag != 'no_log' && needs.sync-and-trigger.outputs.new_tag != 'unknown' }}
+        if: ${{ needs.compare-and-trigger.outputs.new_tag != '' && needs.compare-and-trigger.outputs.new_tag != 'no_log' && needs.compare-and-trigger.outputs.new_tag != 'unknown' }}
         run: |
-          echo "Attempting to trigger docker-image.yml with tag: ${{ needs.sync-and-trigger.outputs.new_tag }}"
+          echo "Attempting to trigger docker-image.yml with tag: ${{ needs.compare-and-trigger.outputs.new_tag }}"
           curl -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.TOKEN }}" \
             https://api.github.com/repos/${{ github.repository }}/actions/workflows/docker-image.yml/dispatches \
-            -d '{"ref":"${{ github.ref_name }}","inputs":{"custom_tag":"${{ needs.sync-and-trigger.outputs.new_tag }}"}}'
+            -d '{"ref":"${{ github.ref_name }}","inputs":{"custom_tag":"${{ needs.compare-and-trigger.outputs.new_tag }}"}}'
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN }}
       - name: Log if no tag was available to trigger
-        if: ${{ needs.sync-and-trigger.outputs.new_tag == '' || needs.sync-and-trigger.outputs.new_tag == 'no_log' || needs.sync-and-trigger.outputs.new_tag == 'unknown' }}
+        if: ${{ needs.compare-and-trigger.outputs.new_tag == '' || needs.compare-and-trigger.outputs.new_tag == 'no_log' || needs.compare-and-trigger.outputs.new_tag == 'unknown' }}
         run: |
           echo "Warning: No valid tag was extracted (${TAG}), so the Docker build workflow was not triggered." 
         env:
-          TAG: ${{ needs.sync-and-trigger.outputs.new_tag }}
+          TAG: ${{ needs.compare-and-trigger.outputs.new_tag }}
