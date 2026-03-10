@@ -59,21 +59,29 @@ jobs:
         if: steps.check.outputs.updates_available == 'true'
         run: git push origin ${{ env.LOCAL_BRANCH }}
 
-      - name: Extract tag from Update.log
+      - name: Extract tag from Update.log (root directory)
         id: extract_tag
         if: steps.check.outputs.updates_available == 'true'
         run: |
-          if [ -f "Update.log" ]; then
-            NEW_TAG=$(head -n 1 Update.log | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | head -1)
+          LOG_FILE="./Update.log"
+          
+          echo "Current working directory: $(pwd)"
+          echo "Files in current directory:"
+          ls -la
+          
+          if [ -f "$LOG_FILE" ]; then
+            echo "Update.log file found at path: $LOG_FILE"
+            NEW_TAG=$(head -n 1 "$LOG_FILE" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | head -1)
+            
             if [ -n "$NEW_TAG" ]; then
               echo "Extracted tag from Update.log: $NEW_TAG"
               echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
             else
-              echo "No valid date found in Update.log, using 'unknown' as tag."
+              echo "No valid date format (YYYY/MM/DD) found in Update.log"
               echo "new_tag=unknown" >> $GITHUB_OUTPUT
             fi
           else
-            echo "Update.log file not found, using 'no_log' as tag."
+            echo "Error: Update.log file not found in root directory"
             echo "new_tag=no_log" >> $GITHUB_OUTPUT
           fi
           
