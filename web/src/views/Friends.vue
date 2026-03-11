@@ -14,8 +14,68 @@ const friendStore = useFriendStore()
 const statusStore = useStatusStore()
 const toast = useToastStore()
 const { currentAccountId, currentAccount } = storeToRefs(accountStore)
-const { friends, loading, friendLands, friendLandsLoading, blacklist, interactRecords, interactLoading, interactError } = storeToRefs(friendStore)
+const {
+  friends,
+  loading,
+  friendLands,
+  friendLandsLoading,
+  blacklist,
+  interactRecords,
+  interactLoading,
+  interactError,
+  knownFriendGids,
+  knownFriendGidSyncCooldownSec,
+  knownFriendSettingsLoading,
+  knownFriendSettingsSaving,
+} = storeToRefs(friendStore)
 const { status, loading: statusLoading, realtimeConnected } = storeToRefs(statusStore)
+
+const isQqAccount = computed(() => {
+  const acc = currentAccount.value
+  if (!acc) return false
+  const platform = String(acc.platform || 'qq').toLowerCase()
+  return platform === 'qq'
+})
+
+const knownFriendGidCount = computed(() => knownFriendGids.value.length)
+const knownFriendGidSet = computed(() => new Set(knownFriendGids.value.map(Number)))
+const friendGidSet = computed(() => new Set(friends.value.map(f => Number(f.gid))))
+
+const filteredKnownFriendGids = computed(() => {
+  const keyword = gidSearchKeyword.value.trim().toLowerCase()
+  const list = knownFriendGids.value.map(gid => ({
+    gid: Number(gid),
+    synced: friendGidSet.value.has(Number(gid)),
+  }))
+  if (!keyword) return list
+  return list.filter(item => String(item.gid).includes(keyword))
+})
+
+const syncedGidCount = computed(() => filteredKnownFriendGids.value.filter(item => item.synced).length)
+const unsyncedGidCount = computed(() => filteredKnownFriendGids.value.filter(item => !item.synced).length)
+
+async function handleRemoveGidFromList(gid: number) {
+  if (!currentAccountId.value) return
+  await friendStore.removeKnownFriendGid(currentAccountId.value, gid)
+}
+
+async function handleRemoveUnsyncedGids() {
+  if (!currentAccountId.value) return
+  const unsyncedGids = filteredKnownFriendGids.value.filter(item => !item.synced).map(item => item.gid)
+  if (unsyncedGids.length === 0) {
+    toast.info('没有需要删除的未同步 GID')
+    return
+  }
+  const result = await friendStore.removeUnsyncedKnownFriendGids(currentAccountId.value, unsyncedGids)
+  if (result.ok && result.removedCount > 0) {
+    toast.success(`已删除 ${result.removedCount} 个未同步的 GID`)
+  }
+}
+
+function openGidListModal() {
+  gidSearchKeyword.value = ''
+  showGidListModal.value = true
+}
 
 const TABS = [
   { key: 'friends', label: '好友列表', icon: 'i-carbon-user-multiple' },
@@ -34,6 +94,12 @@ const pendingAction = ref<(() => Promise<void>) | null>(null)
 const avatarErrorKeys = ref<Set<string>>(new Set())
 const searchKeyword = ref('')
 const batchLoading = ref(false)
+const newKnownFriendGid = ref('')
+const localKnownFriendGidSyncCooldownSec = ref(300)
+const showBatchAddGidModal = ref(false)
+const batchGidInput = ref('')
+const showGidListModal = ref(false)
+const gidSearchKeyword = ref('')
 
 const interactFilter = ref('all')
 const interactFilters = [
@@ -110,6 +176,9 @@ async function loadData() {
       friendStore.fetchFriends(currentAccountId.value)
       friendStore.fetchBlacklist(currentAccountId.value)
       friendStore.fetchInteractRecords(currentAccountId.value)
+      if (isQqAccount.value) {
+        friendStore.fetchKnownFriendSettings(currentAccountId.value)
+      }
     }
   }
 }
@@ -175,6 +244,27 @@ function getFriendStatusText(friend: any) {
   if (p.insectNum)
     info.push(`虫${p.insectNum}`)
   return info.length ? info.join(' ') : '无操作'
+}
+
+function getFriendLevel(friend: any) {
+  const level = Number.parseInt(String(friend?.level ?? ''), 10)
+  if (!Number.isFinite(level) || level <= 0)
+    return 0
+  return level
+}
+
+function getFriendGold(friend: any) {
+  const gold = Number.parseInt(String(friend?.gold ?? ''), 10)
+  if (!Number.isFinite(gold) || gold < 0)
+    return 0
+  return gold
+}
+
+function formatFriendGold(value: unknown) {
+  const gold = Number.parseInt(String(value ?? ''), 10)
+  if (!Number.isFinite(gold) || gold < 0)
+    return '0'
+  return gold.toLocaleString('zh-CN')
 }
 
 function getFriendAvatar(friend: any) {
@@ -334,6 +424,89 @@ function formatInteractTime(timestamp: number) {
     hour12: false,
   })
 }
+
+function normalizeKnownFriendGidSyncCooldownSec(value: number) {
+  const v = Number.parseInt(String(value || ''), 10)
+  if (!Number.isFinite(v) || v <= 0) return 600
+  return Math.max(30, Math.min(86400, v))
+}
+
+async function handleAddKnownFriendGid() {
+  if (!currentAccountId.value) return
+  const gid = Number.parseInt(String(newKnownFriendGid.value || ''), 10)
+  if (!Number.isFinite(gid) || gid <= 0) {
+    toast.error('请输入有效的 GID')
+    return
+  }
+  const cooldownSec = normalizeKnownFriendGidSyncCooldownSec(localKnownFriendGidSyncCooldownSec.value)
+  await friendStore.addKnownFriendGid(currentAccountId.value, gid, cooldownSec)
+  newKnownFriendGid.value = ''
+  await refreshFriendsAfterKnownGidChange()
+  toast.success(`已加入同步列表: ${gid}`)
+}
+
+async function handleRemoveKnownFriendGid(friend: any, e: Event) {
+  e.stopPropagation()
+  if (!currentAccountId.value) return
+  const gid = Number(friend?.gid) || 0
+  const name = String(friend?.name || `GID ${gid}`).trim()
+  confirmAction(
+    `确定将 ${name} 移出同步列表吗？后续如果最近访客再次命中，这个 GID 仍可被自动同步回来。`,
+    async () => {
+      await friendStore.removeKnownFriendGid(currentAccountId.value!, gid)
+      await refreshFriendsAfterKnownGidChange()
+      toast.success(`已移出同步列表: ${name}`)
+    },
+  )
+}
+
+async function refreshFriendsAfterKnownGidChange() {
+  if (!currentAccountId.value) return
+  await friendStore.fetchFriends(currentAccountId.value, true)
+}
+
+async function handleSaveKnownFriendSettings() {
+  if (!currentAccountId.value) return
+  const cooldownSec = normalizeKnownFriendGidSyncCooldownSec(localKnownFriendGidSyncCooldownSec.value)
+  await friendStore.saveKnownFriendSettings(currentAccountId.value, {
+    knownFriendGidSyncCooldownSec: cooldownSec,
+  })
+  toast.success('设置已保存')
+}
+
+watch(knownFriendGidSyncCooldownSec, (val) => {
+  localKnownFriendGidSyncCooldownSec.value = val
+})
+
+function parseBatchGids(input: string): number[] {
+  const text = String(input || '').trim()
+  if (!text) return []
+  const gids: number[] = []
+  const parts = text.split(/[\n,，\s]+/).map(s => s.trim()).filter(Boolean)
+  for (const part of parts) {
+    const num = Number.parseInt(part, 10)
+    if (Number.isFinite(num) && num > 0 && !gids.includes(num)) {
+      gids.push(num)
+    }
+  }
+  return gids
+}
+
+async function handleBatchAddKnownFriendGids() {
+  if (!currentAccountId.value) return
+  const gids = parseBatchGids(batchGidInput.value)
+  if (gids.length === 0) {
+    toast.error('请输入有效的 GID 列表')
+    return
+  }
+  const result = await friendStore.batchAddKnownFriendGids(currentAccountId.value, gids)
+  if (result.ok) {
+    batchGidInput.value = ''
+    showBatchAddGidModal.value = false
+    await refreshFriendsAfterKnownGidChange()
+    toast.success(`已批量添加 ${result.addedCount} 个 GID`)
+  }
+}
 </script>
 
 <template>
@@ -417,6 +590,82 @@ function formatInteractTime(timestamp: number) {
 
     <template v-else>
       <div v-if="activeTab === 'friends'" class="space-y-4">
+        <div v-if="currentAccountId && isQqAccount" class="mb-4 border border-amber-200 rounded-lg bg-white p-4 shadow dark:border-amber-700/50 dark:bg-gray-800">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div class="flex items-center gap-2">
+                <div class="i-carbon-user-profile text-lg text-amber-500" />
+                <h3 class="text-lg text-gray-700 font-semibold dark:text-gray-200">
+                  QQ 好友自动同步
+                </h3>
+                <button
+                  class="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 transition cursor-pointer dark:bg-amber-900/30 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50"
+                  @click="openGidListModal"
+                >
+                  {{ knownFriendGidCount }}
+                </button>
+              </div>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                QQ 新好友接口依赖已知 GID。系统会自动从最近访客补充，进入好友农场明确失败时自动移除失效 GID。
+              </p>
+            </div>
+            <div class="flex shrink-0 gap-2">
+              <button
+                class="rounded bg-amber-100 px-3 py-1.5 text-sm text-amber-700 transition dark:bg-amber-900/30 hover:bg-amber-200 dark:text-amber-400 disabled:opacity-50 dark:hover:bg-amber-900/50"
+                :disabled="knownFriendSettingsLoading"
+                @click="currentAccountId && friendStore.fetchKnownFriendSettings(currentAccountId)"
+              >
+                <div v-if="knownFriendSettingsLoading" class="i-svg-spinners-90-ring-with-bg mr-1 inline-block align-text-bottom" />
+                刷新
+              </button>
+              <button
+                class="rounded bg-green-100 px-3 py-1.5 text-sm text-green-700 transition dark:bg-green-900/30 hover:bg-green-200 dark:text-green-400 disabled:opacity-50 dark:hover:bg-green-900/50"
+                :disabled="knownFriendSettingsSaving"
+                @click="handleSaveKnownFriendSettings"
+              >
+                <div v-if="knownFriendSettingsSaving" class="i-svg-spinners-90-ring-with-bg mr-1 inline-block align-text-bottom" />
+                保存设置
+              </button>
+              <button
+                class="rounded bg-blue-100 px-3 py-1.5 text-sm text-blue-700 transition dark:bg-blue-900/30 hover:bg-blue-200 dark:text-blue-400 disabled:opacity-50 dark:hover:bg-blue-900/50"
+                @click="showBatchAddGidModal = true"
+              >
+                批量新增 GID
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px_auto]">
+            <div>
+              <label class="mb-1 block text-xs text-gray-500 dark:text-gray-400">新增 GID</label>
+              <input
+                v-model="newKnownFriendGid"
+                type="number"
+                placeholder="输入好友 GID"
+                class="w-full border border-gray-300 rounded-lg bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+            </div>
+            <div>
+              <label class="mb-1 block text-xs text-gray-500 dark:text-gray-400">访客检测入库冷却(秒)</label>
+              <input
+                v-model.number="localKnownFriendGidSyncCooldownSec"
+                type="number"
+                placeholder="600"
+                class="w-full border border-gray-300 rounded-lg bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+            </div>
+            <div class="flex items-end">
+              <button
+                class="rounded bg-green-500 px-4 py-2 text-sm text-white transition hover:bg-green-600 disabled:opacity-50"
+                :disabled="knownFriendSettingsSaving || !newKnownFriendGid"
+                @click="handleAddKnownFriendGid"
+              >
+                新增 GID
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div v-if="friends.length === 0" class="rounded-lg bg-white p-8 text-center text-gray-500 shadow dark:bg-gray-800">
           暂无好友或数据加载失败
         </div>
@@ -474,7 +723,22 @@ function formatInteractTime(timestamp: number) {
                 <div>
                   <div class="flex items-center gap-2 font-bold">
                     {{ friend.name }} ({{ friend.gid }})
+
                     <span v-if="blacklist.includes(Number(friend.gid))" class="rounded bg-gray-200 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-700 dark:text-gray-400">已屏蔽</span>
+                  </div>
+                  <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                    <span 
+                      v-if="getFriendLevel(friend) > 0" 
+                      class="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500 dark:bg-gray-700 dark:text-gray-300" 
+                    > 
+                      Lv.{{ getFriendLevel(friend) }} 
+                    </span> 
+                    <span 
+                      v-if="getFriendGold(friend) > 0" 
+                      class="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300" 
+                    > 
+                      金币 {{ formatFriendGold(friend.gold) }} 
+                    </span>
                   </div>
                   <div class="text-sm" :class="getFriendStatusText(friend) !== '无操作' ? 'text-green-500 font-medium' : 'text-gray-400'">
                     {{ getFriendStatusText(friend) }}
@@ -521,6 +785,13 @@ function formatInteractTime(timestamp: number) {
                   @click="handleToggleBlacklist(friend, $event)"
                 >
                   {{ blacklist.includes(Number(friend.gid)) ? '移出黑名单' : '加入黑名单' }}
+                </button>
+                <button
+                  v-if="isQqAccount && knownFriendGidSet.has(Number(friend.gid))"
+                  class="rounded bg-amber-100 px-3 py-2 text-sm text-amber-700 transition hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50"
+                  @click="handleRemoveKnownFriendGid(friend, $event)"
+                >
+                  移出同步列表
                 </button>
               </div>
             </div>
@@ -677,5 +948,136 @@ function formatInteractTime(timestamp: number) {
       @confirm="onConfirm"
       @cancel="!confirmLoading && (showConfirm = false)"
     />
+
+    <Teleport to="body">
+      <div
+        v-if="showBatchAddGidModal"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        @click.self="showBatchAddGidModal = false"
+      >
+        <div class="w-full max-w-lg rounded-lg bg-white p-6 shadow-xl dark:bg-gray-800">
+          <h3 class="mb-4 text-lg text-gray-800 font-semibold dark:text-gray-100">
+            批量新增 GID
+          </h3>
+          <p class="mb-3 text-sm text-gray-500 dark:text-gray-400">
+            支持一行一个或用逗号/空格分隔，自动去重
+          </p>
+          <textarea
+            v-model="batchGidInput"
+            rows="8"
+            placeholder="每行一个 GID，或用逗号、空格分隔&#10;例如：&#10;12345678&#10;87654321&#10;或&#10;12345678, 87654321, 11111111"
+            class="mb-4 w-full border border-gray-300 rounded-lg bg-white p-3 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          <div class="flex justify-end gap-3">
+            <button
+              class="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 transition hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+              @click="showBatchAddGidModal = false"
+            >
+              取消
+            </button>
+            <button
+              class="rounded-lg bg-blue-500 px-4 py-2 text-sm text-white transition hover:bg-blue-600 disabled:opacity-50"
+              :disabled="knownFriendSettingsSaving || !batchGidInput.trim()"
+              @click="handleBatchAddKnownFriendGids"
+            >
+              <div v-if="knownFriendSettingsSaving" class="i-svg-spinners-90-ring-with-bg mr-1 inline-block align-text-bottom" />
+              确认添加
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="showGidListModal"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        @click.self="showGidListModal = false"
+      >
+        <div class="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg bg-white shadow-xl dark:bg-gray-800">
+          <div class="flex shrink-0 items-center justify-between border-b border-gray-200 p-4 dark:border-gray-700">
+            <div>
+              <h3 class="text-lg text-gray-800 font-semibold dark:text-gray-100">
+                已导入的 GID 列表
+              </h3>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                共 {{ knownFriendGidCount }} 个 GID，
+                <span class="text-yellow-600 dark:text-yellow-400">已同步 {{ syncedGidCount }} 个</span>，
+                <span class="text-red-600 dark:text-red-400">未同步 {{ unsyncedGidCount }} 个</span>
+              </p>
+            </div>
+            <button
+              class="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 dark:hover:bg-gray-700"
+              @click="showGidListModal = false"
+            >
+              <div class="i-carbon-close text-xl" />
+            </button>
+          </div>
+
+          <div class="shrink-0 border-b border-gray-200 p-4 dark:border-gray-700">
+            <div class="flex gap-2">
+              <input
+                v-model="gidSearchKeyword"
+                type="text"
+                placeholder="搜索 GID..."
+                class="flex-1 border border-gray-300 rounded-lg bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+              <button
+                class="shrink-0 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-700 transition dark:bg-red-900/30 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 disabled:opacity-50"
+                :disabled="knownFriendSettingsSaving || unsyncedGidCount === 0"
+                @click="handleRemoveUnsyncedGids"
+              >
+                <div v-if="knownFriendSettingsSaving" class="i-svg-spinners-90-ring-with-bg mr-1 inline-block align-text-bottom" />
+                删除未同步 ({{ unsyncedGidCount }})
+              </button>
+            </div>
+          </div>
+
+          <div class="flex-1 overflow-y-auto p-4">
+            <div v-if="filteredKnownFriendGids.length === 0" class="py-8 text-center text-gray-500 dark:text-gray-400">
+              暂无数据
+            </div>
+            <div v-else class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              <div
+                v-for="item in filteredKnownFriendGids"
+                :key="item.gid"
+                class="flex items-center justify-between rounded-lg border p-2 transition"
+                :class="[
+                  item.synced
+                    ? 'border-yellow-300 bg-yellow-50 dark:border-yellow-700/50 dark:bg-yellow-900/20'
+                    : 'border-red-300 bg-red-50 dark:border-red-700/50 dark:bg-red-900/20'
+                ]"
+              >
+                <div class="flex items-center gap-2">
+                  <span
+                    class="text-sm font-mono"
+                    :class="item.synced ? 'text-yellow-700 dark:text-yellow-400' : 'text-red-700 dark:text-red-400'"
+                  >
+                    {{ item.gid }}
+                  </span>
+                  <span
+                    v-if="item.synced"
+                    class="rounded bg-yellow-200 px-1 py-0.5 text-xs text-yellow-700 dark:bg-yellow-800/50 dark:text-yellow-300"
+                  >
+                    已同步
+                  </span>
+                  <span
+                    v-else
+                    class="rounded bg-red-200 px-1 py-0.5 text-xs text-red-700 dark:bg-red-800/50 dark:text-red-300"
+                  >
+                    未同步
+                  </span>
+                </div>
+                <button
+                  class="rounded p-1 text-gray-400 transition hover:bg-gray-200 hover:text-red-500 dark:hover:bg-gray-700"
+                  :disabled="knownFriendSettingsSaving"
+                  @click="handleRemoveGidFromList(item.gid)"
+                >
+                  <div class="i-carbon-trash-can text-sm" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

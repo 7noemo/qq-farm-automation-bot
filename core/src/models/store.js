@@ -18,6 +18,26 @@ const PUSHOO_CHANNELS = new Set([
 
 const DEFAULT_FERTILIZER_LAND_TYPES = ['gold', 'black', 'red', 'normal'];
 const FERTILIZER_LAND_TYPE_SET = new Set(DEFAULT_FERTILIZER_LAND_TYPES);
+const INTERVAL_MAX_SEC = 86400;
+const DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC = 300;
+
+function normalizeKnownFriendGids(input, fallback = []) {
+    const source = Array.isArray(input) ? input : fallback;
+    const normalized = [];
+    for (const item of source) {
+        const value = Number.parseInt(item, 10);
+        if (!Number.isFinite(value) || value <= 0) continue;
+        if (normalized.includes(value)) continue;
+        normalized.push(value);
+    }
+    return normalized;
+}
+
+function normalizeKnownFriendGidSyncCooldownSec(input, fallback = DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC) {
+    const value = Number.parseInt(input, 10);
+    const base = Number.isFinite(value) ? value : fallback;
+    return Math.max(30, Math.min(INTERVAL_MAX_SEC, base));
+}
 const DEFAULT_OFFLINE_REMINDER = {
     channel: 'webhook',
     reloginUrlMode: 'none',
@@ -72,6 +92,8 @@ const DEFAULT_ACCOUNT_CONFIG = {
         start: '23:00',
         end: '07:00',
     },
+    knownFriendGids: [],
+    knownFriendGidSyncCooldownSec: DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC,
     friendBlacklist: [],
     // 蔬菜黑名单（偷菜时不偷的作物 seedId 列表）
     plantBlacklist: [
@@ -102,6 +124,8 @@ let accountFallbackConfig = {
     automation: { ...DEFAULT_ACCOUNT_CONFIG.automation, fertilizer_land_types: [...DEFAULT_FERTILIZER_LAND_TYPES] },
     intervals: { ...DEFAULT_ACCOUNT_CONFIG.intervals },
     friendQuietHours: { ...DEFAULT_ACCOUNT_CONFIG.friendQuietHours },
+    knownFriendGids: [],
+    knownFriendGidSyncCooldownSec: DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC,
 };
 
 const globalConfig = {
@@ -195,6 +219,9 @@ function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
 
     const rawBlacklist = Array.isArray(base.friendBlacklist) ? base.friendBlacklist : [];
 
+    const knownFriendGids = normalizeKnownFriendGids(base.knownFriendGids);
+    const knownFriendGidSyncCooldownSec = normalizeKnownFriendGidSyncCooldownSec(base.knownFriendGidSyncCooldownSec);
+
     // 蔬菜黑名单
     const rawPlantBlacklist = Array.isArray(base.plantBlacklist) ? base.plantBlacklist : [];
 
@@ -209,6 +236,8 @@ function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
         automation,
         intervals: { ...(base.intervals || DEFAULT_ACCOUNT_CONFIG.intervals) },
         friendQuietHours: { ...(base.friendQuietHours || DEFAULT_ACCOUNT_CONFIG.friendQuietHours) },
+        knownFriendGids,
+        knownFriendGidSyncCooldownSec,
         friendBlacklist: rawBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0),
         plantingStrategy: ALLOWED_PLANTING_STRATEGIES.includes(String(base.plantingStrategy || ''))
             ? String(base.plantingStrategy)
@@ -279,6 +308,17 @@ function normalizeAccountConfig(input, fallback = accountFallbackConfig) {
 
     if (Array.isArray(src.friendBlacklist)) {
         cfg.friendBlacklist = src.friendBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0);
+    }
+
+    if (src.knownFriendGids !== undefined) {
+        cfg.knownFriendGids = normalizeKnownFriendGids(src.knownFriendGids, cfg.knownFriendGids);
+    }
+
+    if (src.knownFriendGidSyncCooldownSec !== undefined) {
+        cfg.knownFriendGidSyncCooldownSec = normalizeKnownFriendGidSyncCooldownSec(
+            src.knownFriendGidSyncCooldownSec,
+            cfg.knownFriendGidSyncCooldownSec,
+        );
     }
 
     // 蔬菜黑名单
@@ -499,6 +539,8 @@ function getConfigSnapshot(accountId) {
         preferredSeedId: cfg.preferredSeedId,
         intervals: { ...cfg.intervals },
         friendQuietHours: { ...cfg.friendQuietHours },
+        knownFriendGids: [...(cfg.knownFriendGids || [])],
+        knownFriendGidSyncCooldownSec: cfg.knownFriendGidSyncCooldownSec,
         friendBlacklist: [...(cfg.friendBlacklist || [])],
         plantBlacklist: [...(cfg.plantBlacklist || [])],
         stealDelaySeconds: Math.max(0, Math.min(300, Number(cfg.stealDelaySeconds) || 0)),
@@ -561,6 +603,17 @@ function applyConfigSnapshot(snapshot, options = {}) {
 
     if (Array.isArray(cfg.friendBlacklist)) {
         next.friendBlacklist = cfg.friendBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0);
+    }
+
+    if (cfg.knownFriendGids !== undefined) {
+        next.knownFriendGids = normalizeKnownFriendGids(cfg.knownFriendGids, next.knownFriendGids);
+    }
+
+    if (cfg.knownFriendGidSyncCooldownSec !== undefined) {
+        next.knownFriendGidSyncCooldownSec = normalizeKnownFriendGidSyncCooldownSec(
+            cfg.knownFriendGidSyncCooldownSec,
+            next.knownFriendGidSyncCooldownSec,
+        );
     }
 
     // 蔬菜黑名单
@@ -669,6 +722,33 @@ function getFriendQuietHours(accountId) {
     return { ...getAccountConfigSnapshot(accountId).friendQuietHours };
 }
 
+function getKnownFriendGids(accountId) {
+    return [...(getAccountConfigSnapshot(accountId).knownFriendGids || [])];
+}
+
+function setKnownFriendGids(accountId, list) {
+    const current = getAccountConfigSnapshot(accountId);
+    const next = normalizeAccountConfig(current, accountFallbackConfig);
+    next.knownFriendGids = normalizeKnownFriendGids(list, next.knownFriendGids);
+    setAccountConfigSnapshot(accountId, next);
+    return [...next.knownFriendGids];
+}
+
+function getKnownFriendGidSyncCooldownSec(accountId) {
+    return normalizeKnownFriendGidSyncCooldownSec(getAccountConfigSnapshot(accountId).knownFriendGidSyncCooldownSec);
+}
+
+function setKnownFriendGidSyncCooldownSec(accountId, sec) {
+    const current = getAccountConfigSnapshot(accountId);
+    const normalized = normalizeKnownFriendGidSyncCooldownSec(sec, current.knownFriendGidSyncCooldownSec);
+    const next = normalizeAccountConfig({
+        ...current,
+        knownFriendGidSyncCooldownSec: normalized,
+    }, accountFallbackConfig);
+    setAccountConfigSnapshot(accountId, next, true);
+    return next.knownFriendGidSyncCooldownSec;
+}
+
 function getFriendBlacklist(accountId) {
     return [...(getAccountConfigSnapshot(accountId).friendBlacklist || [])];
 }
@@ -679,6 +759,16 @@ function setFriendBlacklist(accountId, list) {
     next.friendBlacklist = Array.isArray(list) ? list.map(Number).filter(n => Number.isFinite(n) && n > 0) : [];
     setAccountConfigSnapshot(accountId, next);
     return [...next.friendBlacklist];
+}
+
+function addFriendToBlacklist(accountId, gid) {
+    const gidNum = Number(gid);
+    if (!gidNum || gidNum <= 0) return false;
+    const current = getFriendBlacklist(accountId);
+    if (current.includes(gidNum)) return false;
+    const newList = [...current, gidNum];
+    setFriendBlacklist(accountId, newList);
+    return true;
 }
 
 // ============ 偷取延迟 ============
@@ -930,8 +1020,13 @@ module.exports = {
     getPlantingStrategy,
     getIntervals,
     getFriendQuietHours,
+    getKnownFriendGids,
+    setKnownFriendGids,
+    getKnownFriendGidSyncCooldownSec,
+    setKnownFriendGidSyncCooldownSec,
     getFriendBlacklist,
     setFriendBlacklist,
+    addFriendToBlacklist,
     getStealDelaySeconds,
     getPlantOrderRandom,
     getPlantDelaySeconds,
