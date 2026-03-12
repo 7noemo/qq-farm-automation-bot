@@ -10,7 +10,6 @@ jobs:
   sync-fork:
     runs-on: ubuntu-latest
     outputs:
-      # 仅在成功同步时输出版本号
       version_tag: ${{ steps.ensure_outputs.outputs.final_version_tag }}
     steps:
       - name: Checkout Fork Repository
@@ -42,22 +41,19 @@ jobs:
             echo "No sync needed."
           fi
 
-      # 新增步骤：如果不需要同步，则故意失败，终止整个作业
       - name: Exit if No Sync Needed
         if: steps.check_sync.outputs.need_sync == 'false'
         run: |
           echo "Repository is up-to-date with upstream. Exiting."
-          exit 1 # 立即失败并退出整个作业
+          exit 1
 
-      # 步骤：同步代码到 Fork 仓库（仅在 need_sync 为 true 时执行）
-      # 移除 continue-on-error，让任何同步失败都导致作业失败
+      # 移除了 continue-on-error，让同步失败直接导致作业失败
       - name: Sync Code to Fork
         run: |
           git checkout main
           git merge upstream/main --no-edit
           git push origin main
 
-      # 步骤：提取 Update.log 中的版本号
       - name: Extract Version from Update.log
         id: extract_version
         run: |
@@ -70,14 +66,13 @@ jobs:
               echo "Extracted version tag: $VERSION_TAG"
             else
               echo "Could not find a valid date format in Update.log." >&2
-              exit 1 # 如果提取失败，也让作业失败
+              exit 1
             fi
           else
             echo "Update.log not found in this commit." >&2
-            exit 1 # 如果文件不存在，也让作业失败
+            exit 1
           fi
 
-      # 步骤：统一设置最终的 version_tag 输出
       - name: Ensure Final Outputs
         id: ensure_outputs
         run: |
@@ -88,8 +83,9 @@ jobs:
   # 触发 Docker 构建工作流（仅在 sync-fork 作业成功完成时执行）
   trigger-docker-build:
     needs: sync-fork
-    # 只有当 sync-fork 作业结果为 success 时才触发
-    if: ${{ needs.sync-fork.result == 'success' }}
+    # 关键：只依赖于上游作业的成功。当 sync-fork 因为 "no sync needed" 而失败时，此作业不会运行。
+    # 同时，我们也检查 version_tag 是否存在，以防万一 extract_version 出现意外情况。
+    if: ${{ needs.sync-fork.result == 'success' && needs.sync-fork.outputs.version_tag != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Docker Image Build Workflow
