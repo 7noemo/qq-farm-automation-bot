@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       custom_tag:
-        description: 'A custom tag to apply to the image (e.g., 2026/01/01)'
+        description: 'A custom tag to apply to the image (e.g., 2026-03-12)'  # 修正示例格式为 - 分隔
         required: false
         type: string
   workflow_call:
@@ -49,8 +49,8 @@ jobs:
           tags: |
             # Always include 'latest' tag
             type=raw,value=latest,enable=true
-            # Include the custom tag if provided
-            type=raw,value=${{ inputs.custom_tag }},enable=${{ inputs.custom_tag != '' }}
+            # Include the custom tag if provided (兼容 / 和 - 分隔的日期格式)
+            type=raw,value=${{ inputs.custom_tag }},enable=${{ inputs.custom_tag != '' && inputs.custom_tag != 'unknown' && inputs.custom_tag != 'no_log' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
