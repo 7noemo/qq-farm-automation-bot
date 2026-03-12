@@ -11,7 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       need_sync: ${{ steps.check_sync.outputs.need_sync }}
-      version_tag: ${{ steps.extract_version.outputs.version_tag }}
+      # 修正：为 ensure_outputs 添加依赖，以确保它在条件步骤之后运行
+      version_tag: ${{ steps.ensure_outputs.outputs.final_version_tag }}
     steps:
       # 步骤1：检出当前 Fork 仓库代码（拉取完整历史）
       - name: Checkout Fork Repository
@@ -40,8 +41,10 @@ jobs:
           
           if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
             echo "need_sync=true" >> $GITHUB_OUTPUT
+            echo "Sync is needed."
           else
             echo "need_sync=false" >> $GITHUB_OUTPUT
+            echo "No sync needed."
           fi
 
       # 步骤5：同步代码到 Fork 仓库（仅需同步时执行，失败不终止）
@@ -58,10 +61,26 @@ jobs:
         id: extract_version
         if: steps.check_sync.outputs.need_sync == 'true'
         run: |
-          FIRST_LINE=$(head -n 1 Update.log)
-          # 提取 YYYY/MM/DD 并转为 YYYY-MM-DD 格式
-          VERSION_TAG=$(echo "$FIRST_LINE" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | sed 's/\//-/g')
-          echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
+          if [ -f "Update.log" ]; then
+            FIRST_LINE=$(head -n 1 Update.log)
+            # 提取 YYYY/MM/DD 并转为 YYYY-MM-DD 格式
+            VERSION_TAG=$(echo "$FIRST_LINE" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | sed 's/\//-/g')
+            echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
+            echo "Extracted version tag: $VERSION_TAG"
+          else
+            echo "Update.log file not found in this commit. Cannot extract version." >&2
+            # 即使命令失败，也不会导致整个步骤失败，因为没有 exit 1
+          fi
+
+      # 步骤7：统一设置最终的 version_tag 输出
+      # 这个步骤总是会运行，确保 job output 总是有值，避免在条件步骤未执行时输出为空
+      - name: Ensure Final Outputs
+        id: ensure_outputs
+        run: |
+          # 如果 extract_version 成功执行，它的输出会被使用；否则，它的输出为空
+          EXTRACTED_VERSION="${{ steps.extract_version.outputs.version_tag }}"
+          echo "Final version tag to pass: $EXTRACTED_VERSION"
+          echo "final_version_tag=$EXTRACTED_VERSION" >> $GITHUB_OUTPUT
 
   # 触发 Docker 构建工作流（需同步且版本号有效时执行）
   trigger-docker-build:
@@ -74,6 +93,10 @@ jobs:
         with:
           workflow: docker-image.yml  # 目标 Docker 工作流文件名
           ref: main  # 触发的分支（按需修改）
-          inputs: '{"version_tag": "${{ needs.sync-fork.outputs.version_tag }}"}'
+          # 修正：使用 YAML 对象格式传递 inputs，而不是 JSON 字符串
+          inputs: |
+            {
+              "version_tag": "${{ needs.sync-fork.outputs.version_tag }}"
+            }
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN }}  # 自定义的 TOKEN 密钥
