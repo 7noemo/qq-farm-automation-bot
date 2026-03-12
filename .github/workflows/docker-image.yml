@@ -17,90 +17,73 @@ on:
         type: string
         default: ""
 
-# 全局环境变量
 env:
   IMAGE_NAME: ar1995/qq-farm-automation-bot
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    # 权限配置（推送镜像/读取代码）
     permissions:
       contents: read
       packages: write
 
     steps:
-      # 步骤1：检出代码仓库
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 获取完整的 Git 历史以支持 git describe
+          fetch-depth: 0
 
-      # 步骤2：设置QEMU（支持多架构构建）
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # 步骤3：设置Docker Buildx（增强构建能力）
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 步骤4：登录DockerHub（使用密钥认证）
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 步骤5：动态计算镜像标签
-      # 此步骤根据输入或Git状态确定所有应应用的标签
       - name: Get Image Tags
         id: get_tags
         run: |
-          #!/usr/bin/env bash
-          
-          # 1. 确定主版本号
-          # 如果提供了自定义标签，则使用它；否则尝试从Git获取
           if [[ -n "${{ inputs.custom_tag }}" ]]; then
             VERSION="${{ inputs.custom_tag }}"
           else
-            # 尝试获取最新的git tag，如果失败则使用短提交哈希
-            VERSION=$(git describe --tags --always --first-parent 2>/dev/null || git rev-parse --short HEAD)
+            VERSION=$(git describe --tags --always || git rev-parse --short HEAD)
           fi
           
-          # 2. 构建标签列表
-          # 包含 版本号, latest (仅当有自定义标签或为main分支时), 和 git sha
           TAGS="${IMAGE_NAME}:${VERSION},${IMAGE_NAME}:sha-${GITHUB_SHA::7}"
-          
-          # 如果是手动触发或有自定义标签，则也推送 latest 标签
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] || [[ -n "${{ inputs.custom_tag }}" ]]; then
+          if [[ -n "${{ inputs.custom_tag }}" ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAGS="${TAGS},${IMAGE_NAME}:latest"
           fi
           
-          # 3. 输出结果
           echo "Computed tags: $TAGS"
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # 步骤6：构建并推送多架构镜像
-      # 使用上一步计算出的标签进行构建
+      - name: Get current datetime
+        id: get_datetime
+        run: echo "datetime=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .                                      # 构建上下文（项目根目录）
-          file: ./core/Dockerfile                         # Dockerfile路径
-          platforms: linux/amd64,linux/arm64,linux/arm/v7 # 支持的架构
-          push: true                                      # 推送镜像到仓库
-          tags: ${{ steps.get_tags.outputs.tags }}        # 使用动态计算的标签
+          context: .
+          file: ./core/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ steps.get_tags.outputs.tags }}
           labels: |
             org.opencontainers.image.version=${{ steps.get_tags.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ fromJSON('{"format":"%Y-%m-%dT%H:%M:%SZ","date":null}') | date }}
+            org.opencontainers.image.created=${{ steps.get_datetime.outputs.datetime }}
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.ref.name=${{ github.ref_name }}
-          cache-from: type=gha                            # 从GitHub Actions缓存拉取
-          cache-to: type=gha,mode=max                     # 推送到GitHub Actions缓存（最大化缓存）
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      # 步骤7：打印推送的标签（调试用）
       - name: Print pushed tags
         run: |
           echo "Workflow triggered by: ${{ github.event_name }}"
