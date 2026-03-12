@@ -4,14 +4,14 @@ on:
   # 手动触发（支持输入自定义标签）
   workflow_dispatch:
     inputs:
-      custom_tag:
-        description: 'Custom tag for the Docker image (e.g., v1.0.0, release-2026). If not provided, will use git tag or short SHA.'
+      version_tag:
+        description: 'Custom tag for the Docker image (e.g., v1.0.0, release-2026). If not provided, today''s date (YYYY-MM-DD) will be used.'
         required: false
         type: string
   # 被其他工作流调用（接收外部传递的标签）
   workflow_call:
     inputs:
-      custom_tag:
+      version_tag:
         description: 'A custom tag passed from the caller workflow'
         required: false
         type: string
@@ -48,14 +48,21 @@ jobs:
       - name: Get Image Tags
         id: get_tags
         run: |
-          if [[ -n "${{ inputs.custom_tag }}" ]]; then
-            VERSION="${{ inputs.custom_tag }}"
+          # 1. 确定主版本号
+          if [[ -n "${{ inputs.version_tag }}" ]]; then
+            # 如果提供了自定义标签，则使用它
+            VERSION="${{ inputs.version_tag }}"
           else
-            VERSION=$(git describe --tags --always || git rev-parse --short HEAD)
+            # 否则，使用今天的日期作为版本号 (格式: YYYY-MM-DD)
+            VERSION=$(date +%Y-%m-%d)
           fi
           
+          # 2. 构建标签列表
+          # 包含 主版本号, latest (仅当有自定义标签或为手动触发时), 和 git short sha
           TAGS="${IMAGE_NAME}:${VERSION},${IMAGE_NAME}:sha-${GITHUB_SHA::7}"
-          if [[ -n "${{ inputs.custom_tag }}" ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          
+          # 如果是手动触发或有自定义标签，则也推送 latest 标签
+          if [[ -n "${{ inputs.version_tag }}" ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAGS="${TAGS},${IMAGE_NAME}:latest"
           fi
           
