@@ -1,102 +1,79 @@
 name: Sync Fork and Trigger Docker Build
 
+# 触发规则：手动触发 + 每30分钟定时触发
 on:
+  workflow_dispatch:  # 手动触发（保留，方便临时执行）
   schedule:
-    - cron: '*/30 * * * *'  # 可根据需求调整执行频率
-  workflow_dispatch:        # 支持手动触发
-
-env:
-  UPSTREAM_REPO: XyhTender/qq-farm-automation-bot  # 替换为你的上游仓库
-  UPSTREAM_BRANCH: main
-  LOCAL_BRANCH: main
+    - cron: '*/30 * * * *'  # 每30分钟触发一次（UTC时间）
 
 jobs:
-  sync-fork-and-extract-tag:
+  sync-fork:
     runs-on: ubuntu-latest
     outputs:
-      new_tag: ${{ steps.extract_tag.outputs.new_tag }}
+      need_sync: ${{ steps.check_sync.outputs.need_sync }}
+      version_tag: ${{ steps.extract_version.outputs.version_tag }}
     steps:
-      # 1. 检出当前仓库代码
-      - name: Checkout local repository
+      # 步骤1：检出当前 Fork 仓库代码（拉取完整历史）
+      - name: Checkout Fork Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.TOKEN }}
           fetch-depth: 0
 
-      # 2. 配置 Git 身份（用于提交同步代码）
-      - name: Configure Git
+      # 步骤2：配置 Git 身份（用于提交同步代码）
+      - name: Configure Git Identity
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
 
-      # 3. 添加上游仓库并检查是否需要同步
-      - name: Check upstream for updates
-        id: check_sync
+      # 步骤3：添加上游仓库远程地址并拉取最新代码
+      - name: Add Upstream Remote and Fetch
         run: |
-          # 添加上游远程仓库（避免重复添加报错）
-          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git 2>/dev/null || true
+          git remote add upstream https://github.com/XyhTender/qq-farm-automation-bot.git
           git fetch upstream
 
-          # 对比本地和上游分支的提交哈希
-          LOCAL_COMMIT=$(git rev-parse ${{ env.LOCAL_BRANCH }})
-          UPSTREAM_COMMIT=$(git rev-parse upstream/${{ env.UPSTREAM_BRANCH }})
-
-          # 核心判断：无更新则失败退出
-          if [ "$LOCAL_COMMIT" = "$UPSTREAM_COMMIT" ]; then
-            echo "❌ No updates from upstream repository. Exiting with failure."
-            exit 1
-          else
-            echo "✅ Upstream has updates. Preparing to sync."
-            echo "need_sync=true" >> $GITHUB_OUTPUT
-          fi
-
-      # 4. 同步上游代码到本地仓库
-      - name: Sync upstream changes
-        if: steps.check_sync.outputs.need_sync == 'true'
+      # 步骤4：检查是否需要同步（对比本地与上游提交）
+      - name: Check if Sync is Needed
+        id: check_sync
         run: |
-          git pull -X theirs upstream ${{ env.UPSTREAM_BRANCH }}
-          git push origin ${{ env.LOCAL_BRANCH }}
-
-      # 5. 提取 Update.log 中的日期作为版本号（格式：2026/03/12 → 2026-03-12）
-      - name: Extract tag from Update.log
-        id: extract_tag
-        if: steps.check_sync.outputs.need_sync == 'true'
-        run: |
-          LOG_FILE="./Update.log"
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/main)  # 上游默认分支若为 master 请修改
           
-          # 检查 Update.log 是否存在
-          if [ ! -f "$LOG_FILE" ]; then
-            echo "❌ Update.log not found in root directory. Exiting with failure."
-            exit 1
+          if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
+            echo "need_sync=true" >> $GITHUB_OUTPUT
+          else
+            echo "need_sync=false" >> $GITHUB_OUTPUT
           fi
 
-          # 读取第一行并提取日期（匹配 "更新日志 2026/03/12" 格式）
-          FIRST_LINE=$(head -n 1 "$LOG_FILE")
-          RAW_DATE=$(echo "$FIRST_LINE" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | head -1)
+      # 步骤5：同步代码到 Fork 仓库（仅需同步时执行，失败不终止）
+      - name: Sync Code to Fork
+        if: steps.check_sync.outputs.need_sync == 'true'
+        continue-on-error: true  # 同步失败不终止任务
+        run: |
+          git checkout main  # 分支名若为 master 请修改
+          git merge upstream/main --no-edit
+          git push origin main
 
-          # 校验日期是否提取成功
-          if [ -z "$RAW_DATE" ]; then
-            echo "❌ No valid date found in Update.log first line. Exiting with failure."
-            exit 1
-          fi
+      # 步骤6：提取 Update.log 中的版本号（仅需同步时执行）
+      - name: Extract Version from Update.log
+        id: extract_version
+        if: steps.check_sync.outputs.need_sync == 'true'
+        run: |
+          FIRST_LINE=$(head -n 1 Update.log)
+          # 提取 YYYY/MM/DD 并转为 YYYY-MM-DD 格式
+          VERSION_TAG=$(echo "$FIRST_LINE" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | sed 's/\//-/g')
+          echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
 
-          # 将 / 替换为 - 生成最终版本号（2026/03/12 → 2026-03-12）
-          NEW_TAG=$(echo "$RAW_DATE" | tr '/' '-')
-          echo "✅ Extracted tag: $NEW_TAG"
-          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
-
-  # 6. 触发 docker-image.yml 工作流（仅同步成功且提取标签成功时执行）
-  trigger-docker-workflow:
-    needs: sync-fork-and-extract-tag
-    if: needs.sync-fork-and-extract-tag.outcome == 'success'
+  # 触发 Docker 构建工作流（需同步且版本号有效时执行）
+  trigger-docker-build:
+    needs: sync-fork
+    if: needs.sync-fork.outputs.need_sync == 'true' && needs.sync-fork.outputs.version_tag != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger docker-image.yml with extracted tag
-        run: |
-          # 构造 API 请求触发工作流
-          curl -L -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ secrets.TOKEN }}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/docker-image.yml/dispatches \
-            -d "{\"ref\":\"${{ env.LOCAL_BRANCH }}\",\"inputs\":{\"custom_tag\":\"${{ needs.sync-fork-and-extract-tag.outputs.new_tag }}\"}}"
+      - name: Trigger Docker Image Build Workflow
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: docker-image.yml  # 目标 Docker 工作流文件名
+          ref: main  # 触发的分支（按需修改）
+          inputs: '{"version_tag": "${{ needs.sync-fork.outputs.version_tag }}"}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}  # 自定义的 TOKEN 密钥
