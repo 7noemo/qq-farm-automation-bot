@@ -47,12 +47,28 @@ jobs:
           echo "Repository is up-to-date with upstream. Exiting."
           exit 1
 
-      # 移除了 continue-on-error，让同步失败直接导致作业失败
-      - name: Sync Code to Fork
+      # 修复：在同步后检查是否有真正的变更
+      - name: Sync Code to Fork and Verify Change
         run: |
           git checkout main
           git merge upstream/main --no-edit
-          git push origin main
+          
+          # 合并后，检查本地 HEAD 是否与上游一致
+          LOCAL_AFTER_MERGE=$(git rev-parse HEAD)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          
+          if [ "$LOCAL_AFTER_MERGE" = "$UPSTREAM_COMMIT" ]; then
+            # 如果合并后，本地 HEAD 与上游一致，说明确实发生了同步更新
+            echo "Merge successful. Pushing changes..."
+            git push origin main
+          else
+            # 如果合并后，本地 HEAD 与上游 still 不一致，说明合并可能有问题
+            # 或者，如果在合并前就一致（即 no-op merge），也会走到这里
+            # 这种情况下，我们认为同步失败或没有变化，应该退出
+            echo "Local HEAD ($LOCAL_AFTER_MERGE) does not match upstream HEAD ($UPSTREAM_COMMIT) after merge, or no-op merge occurred."
+            echo "This indicates no new commits were brought in from upstream."
+            exit 1
+          fi
 
       - name: Extract Version from Update.log
         id: extract_version
@@ -80,11 +96,8 @@ jobs:
           echo "Final version tag to pass: $EXTRACTED_VERSION"
           echo "final_version_tag=$EXTRACTED_VERSION" >> $GITHUB_OUTPUT
 
-  # 触发 Docker 构建工作流（仅在 sync-fork 作业成功完成时执行）
   trigger-docker-build:
     needs: sync-fork
-    # 关键：只依赖于上游作业的成功。当 sync-fork 因为 "no sync needed" 而失败时，此作业不会运行。
-    # 同时，我们也检查 version_tag 是否存在，以防万一 extract_version 出现意外情况。
     if: ${{ needs.sync-fork.result == 'success' && needs.sync-fork.outputs.version_tag != '' }}
     runs-on: ubuntu-latest
     steps:
