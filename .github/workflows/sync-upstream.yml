@@ -2,13 +2,15 @@ name: Compare Files and Trigger Build
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *'   # 每30分钟运行一次
+  workflow_dispatch:         # 允许手动触发
 
 env:
   UPSTREAM_REPO: XyhTender/qq-farm-automation-bot
   UPSTREAM_BRANCH: main
   LOCAL_BRANCH: main
+  # 启用 Node.js 24（解决 deprecation 警告）
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   compare-and-trigger:
@@ -32,19 +34,22 @@ jobs:
         run: |
           git clone --depth 1 --branch ${{ env.UPSTREAM_BRANCH }} "https://github.com/${{ env.UPSTREAM_REPO }}.git" /tmp/upstream_repo
 
+      - name: Debug - Show HEAD commits (optional)
+        run: |
+          echo "=== Local HEAD ==="
+          git log -1 --oneline
+          echo "=== Upstream HEAD ==="
+          git -C /tmp/upstream_repo log -1 --oneline
+
       - name: Compare file contents between local and upstream
         id: compare_files
         run: |
-          # Use rsync to perform a dry-run comparison of file contents.
-          # This is more accurate than comparing commit SHAs.
-          # It compares actual file content and structure.
-          if rsync -rn --delete --exclude='.git' ./ /tmp/upstream_repo/; then
-            # If rsync reports no differences, no files have changed
+          # Use rsync with -c (checksum) to compare actual content, not just size/mtime
+          if rsync -rnc --delete --exclude='.git' ./ /tmp/upstream_repo/ > /dev/null 2>&1; then
             echo "No file changes detected compared to upstream repository."
             echo "should_proceed=false" >> $GITHUB_OUTPUT
             exit 0
           else
-            # If rsync reports differences, files have changed
             echo "File changes detected compared to upstream repository. Proceeding."
             echo "should_proceed=true" >> $GITHUB_OUTPUT
           fi
@@ -65,31 +70,28 @@ jobs:
         if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
           LOG_FILE="./Update.log"
-          
           echo "Current working directory: $(pwd)"
-          echo "Files in current directory:"
           ls -la
-          
+
           if [ -f "$LOG_FILE" ]; then
-            echo "Update.log file found at path: $LOG_FILE"
+            echo "Update.log found. Reading first line..."
             NEW_TAG=$(head -n 1 "$LOG_FILE" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | head -1)
-            
             if [ -n "$NEW_TAG" ]; then
-              echo "Extracted tag from Update.log: $NEW_TAG"
+              echo "Extracted tag: $NEW_TAG"
               echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
             else
-              echo "No valid date format (YYYY/MM/DD) found in Update.log"
+              echo "No valid date (YYYY/MM/DD) in Update.log"
               echo "new_tag=unknown" >> $GITHUB_OUTPUT
             fi
           else
-            echo "Error: Update.log file not found in root directory"
+            echo "Update.log NOT FOUND"
             echo "new_tag=no_log" >> $GITHUB_OUTPUT
           fi
-          
+
       - name: Print sync summary
         if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
-          echo "Repository synced with upstream. Triggering build with tag: ${{ steps.extract_tag.outputs.new_tag }}"
+          echo "✅ Repository synced. Tag: ${{ steps.extract_tag.outputs.new_tag }}"
 
   trigger-docker-build:
     needs: compare-and-trigger
@@ -99,17 +101,16 @@ jobs:
       - name: Trigger Docker Build Workflow
         if: ${{ needs.compare-and-trigger.outputs.new_tag != '' && needs.compare-and-trigger.outputs.new_tag != 'no_log' && needs.compare-and-trigger.outputs.new_tag != 'unknown' }}
         run: |
-          echo "Attempting to trigger docker-image.yml with tag: ${{ needs.compare-and-trigger.outputs.new_tag }}"
+          echo "🚀 Triggering docker-image.yml with tag: ${{ needs.compare-and-trigger.outputs.new_tag }}"
           curl -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.TOKEN }}" \
             https://api.github.com/repos/${{ github.repository }}/actions/workflows/docker-image.yml/dispatches \
             -d '{"ref":"${{ github.ref_name }}","inputs":{"custom_tag":"${{ needs.compare-and-trigger.outputs.new_tag }}"}}'
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
-      - name: Log if no tag was available to trigger
+
+      - name: Log if no valid tag available
         if: ${{ needs.compare-and-trigger.outputs.new_tag == '' || needs.compare-and-trigger.outputs.new_tag == 'no_log' || needs.compare-and-trigger.outputs.new_tag == 'unknown' }}
         run: |
-          echo "Warning: No valid tag was extracted (${TAG}), so the Docker build workflow was not triggered." 
+          echo "⚠️ Warning: No valid tag extracted (${TAG}), skipping Docker build trigger."
         env:
           TAG: ${{ needs.compare-and-trigger.outputs.new_tag }}
