@@ -1,12 +1,14 @@
 name: Build and Push Multi-Arch Docker Image
 
 on:
+  # 手动触发（支持输入自定义标签）
   workflow_dispatch:
     inputs:
       custom_tag:
-        description: 'A custom tag to apply to the image (e.g., 2026-03-12)'  # 修正示例格式为 - 分隔
+        description: 'A custom tag to apply to the image (e.g., 2026-03-12)'
         required: false
         type: string
+  # 被其他工作流调用（接收外部传递的标签）
   workflow_call:
     inputs:
       custom_tag:
@@ -15,51 +17,69 @@ on:
         type: string
         default: ""
 
+# 全局环境变量
 env:
   IMAGE_NAME: ar1995/qq-farm-automation-bot
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # 权限配置（推送镜像/读取代码）
     permissions:
       contents: read
       packages: write
 
     steps:
+      # 步骤1：检出代码仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 步骤2：设置QEMU（支持多架构构建）
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
+      # 步骤3：设置Docker Buildx（增强构建能力）
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 步骤4：登录DockerHub（使用密钥认证）
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # 步骤5：提取镜像元数据（标签/标签）
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
+          # 镜像标签规则
           tags: |
-            # Always include 'latest' tag
+            # 始终推送latest标签
             type=raw,value=latest,enable=true
-            # Include the custom tag if provided (兼容 / 和 - 分隔的日期格式)
+            # 仅当custom_tag有效时推送自定义标签
             type=raw,value=${{ inputs.custom_tag }},enable=${{ inputs.custom_tag != '' && inputs.custom_tag != 'unknown' && inputs.custom_tag != 'no_log' }}
+          # 补充镜像标签（增强可追溯性）
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.created }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
 
+      # 步骤6：构建并推送多架构镜像
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./core/Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          context: .                          # 构建上下文（项目根目录）
+          file: ./core/Dockerfile              # Dockerfile路径
+          platforms: linux/amd64,linux/arm64,linux/arm/v7  # 支持的架构
+          push: true                          # 推送镜像到仓库
+          tags: ${{ steps.meta.outputs.tags }} # 从元数据步骤获取标签
+          labels: ${{ steps.meta.outputs.labels }} # 从元数据步骤获取标签
+          cache-from: type=gha                # 从GitHub Actions缓存拉取
+          cache-to: type=gha,mode=max         # 推送到GitHub Actions缓存（最大化缓存）
+
+      # 步骤7：打印推送的标签（调试用）
+      - name: Print pushed tags
+        run: echo "Successfully pushed tags: ${{ steps.meta.outputs.tags }}"
