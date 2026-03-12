@@ -10,7 +10,9 @@ jobs:
   sync-fork:
     runs-on: ubuntu-latest
     outputs:
-      need_sync: ${{ steps.check_sync.outputs.need_sync }}
+      # 因为作业可能会因 no-op 而失败，这里不从作业输出读取，而是通过 needs.result 判断
+      # version_tag: ${{ steps.ensure_outputs.outputs.final_version_tag }}
+      # 如果后续作业需要，可以将 version_tag 输出到作业级别
       version_tag: ${{ steps.ensure_outputs.outputs.final_version_tag }}
     steps:
       # 步骤1：检出当前 Fork 仓库代码（拉取完整历史）
@@ -46,19 +48,26 @@ jobs:
             echo "No sync needed."
           fi
 
-      # 步骤5：同步代码到 Fork 仓库（仅需同步时执行，失败不终止）
+      # 步骤5：如果不需要同步，则故意失败，终止整个作业
+      - name: Fail if No Sync Needed (No-Op)
+        if: steps.check_sync.outputs.need_sync == 'false'
+        run: |
+          echo "Upstream is up-to-date. No changes to sync. Terminating workflow early."
+          exit 1
+
+      # 步骤6：同步代码到 Fork 仓库（仅在 need_sync 为 true 时执行）
       - name: Sync Code to Fork
-        if: steps.check_sync.outputs.need_sync == 'true'
-        continue-on-error: true
+        # 移除 if 条件，因为它现在由上一步的失败保证了
+        continue-on-error: true # 同步失败不终止任务，但最好能区分不同类型的失败
         run: |
           git checkout main
           git merge upstream/main --no-edit
           git push origin main
 
-      # 步骤6：提取 Update.log 中的版本号（仅需同步时执行）
+      # 步骤7：提取 Update.log 中的版本号（仅在 need_sync 为 true 时执行）
       - name: Extract Version from Update.log
         id: extract_version
-        if: steps.check_sync.outputs.need_sync == 'true'
+        # 移除 if 条件
         run: |
           if [ -f "Update.log" ]; then
             echo "Update.log found. Attempting to extract version..."
@@ -69,24 +78,29 @@ jobs:
               echo "Extracted version tag: $VERSION_TAG"
             else
               echo "Could not find a valid date format in Update.log." >&2
+              # 可选：如果版本号提取失败，也可以选择退出
+              # exit 1
             fi
           else
             echo "Update.log not found in this commit." >&2
+            # 可选：如果文件不存在，可以选择退出
+            # exit 1
           fi
 
-      # 步骤7：统一设置最终的 version_tag 输出
+      # 步骤8：统一设置最终的 version_tag 输出
       - name: Ensure Final Outputs
         id: ensure_outputs
+        # 移除 if 条件
         run: |
           EXTRACTED_VERSION="${{ steps.extract_version.outputs.version_tag }}"
           echo "Final version tag to pass: $EXTRACTED_VERSION"
           echo "final_version_tag=$EXTRACTED_VERSION" >> $GITHUB_OUTPUT
 
-  # 触发 Docker 构建工作流（需同步且版本号有效时执行）
+  # 触发 Docker 构建工作流（仅在 sync-fork 作业成功完成时执行）
   trigger-docker-build:
     needs: sync-fork
-    # 检查 need_sync 为 true 且 version_tag 不为空
-    if: ${{ needs.sync-fork.outputs.need_sync == 'true' && needs.sync-fork.outputs.version_tag != '' }}
+    # 条件改为：只有当 sync-fork 作业成功 (result == 'success') 时才运行
+    if: ${{ needs.sync-fork.result == 'success' && needs.sync-fork.outputs.version_tag != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Docker Image Build Workflow
@@ -94,7 +108,6 @@ jobs:
         with:
           workflow: docker-image.yml
           ref: main
-          # 使用正确的 YAML 对象格式
           inputs: |
             {
               "version_tag": "${{ needs.sync-fork.outputs.version_tag }}"
