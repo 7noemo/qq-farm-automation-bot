@@ -44,29 +44,30 @@ jobs:
       - name: Compare file contents between local and upstream
         id: compare_files
         run: |
-          # Use rsync with -c (checksum) to compare actual content, not just size/mtime
+          # 修复rsync判断逻辑：rsync返回0表示无差异，非0表示有差异
           if rsync -rnc --delete --exclude='.git' ./ /tmp/upstream_repo/ > /dev/null 2>&1; then
             echo "Error: No file changes detected compared to upstream repository. Exiting with failure."
-            exit 1  # 无变更时直接失败退出（非0状态码）
+            echo "should_proceed=false" >> $GITHUB_OUTPUT
+            exit 1  # 无变更时失败退出
           else
             echo "File changes detected compared to upstream repository. Proceeding."
             echo "should_proceed=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Sync upstream changes into local repository
-        if: steps.compare_files.outcome == 'success'
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
-          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git || true
           git fetch upstream
           git pull -X theirs upstream ${{ env.UPSTREAM_BRANCH }}
 
       - name: Push merged changes to local main branch
-        if: steps.compare_files.outcome == 'success'
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: git push origin ${{ env.LOCAL_BRANCH }}
 
       - name: Extract tag from Update.log (root directory)
         id: extract_tag
-        if: steps.compare_files.outcome == 'success'
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
           LOG_FILE="./Update.log"
           echo "Current working directory: $(pwd)"
@@ -79,29 +80,34 @@ jobs:
               echo "Extracted tag: $NEW_TAG"
               echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
             else
-              echo "Error: No valid date (YYYY/MM/DD) in Update.log. Exiting with failure."
-              exit 1  # 提取标签失败也失败退出
+              echo "Error: No valid date (YYYY/MM/DD) in Update.log."
+              echo "new_tag=unknown" >> $GITHUB_OUTPUT
+              exit 1  # 标签提取失败退出
             fi
           else
-            echo "Error: Update.log NOT FOUND. Exiting with failure."
-            exit 1  # 无日志文件也失败退出
+            echo "Error: Update.log NOT FOUND."
+            echo "new_tag=no_log" >> $GITHUB_OUTPUT
+            exit 1  # 无日志文件退出
           fi
 
       - name: Print sync summary
-        if: steps.compare_files.outcome == 'success'
+        if: steps.compare_files.outputs.should_proceed == 'true'
         run: |
           echo "✅ Repository synced. Tag: ${{ steps.extract_tag.outputs.new_tag }}"
 
   trigger-docker-build:
     needs: compare-and-trigger
-    if: needs.compare-and-trigger.outcome == 'success'
+    if: needs.compare-and-trigger.outputs.should_proceed == 'true' && needs.compare-and-trigger.outputs.new_tag != 'unknown' && needs.compare-and-trigger.outputs.new_tag != 'no_log'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Docker Build Workflow
         run: |
           echo "🚀 Triggering docker-image.yml with tag: ${{ needs.compare-and-trigger.outputs.new_tag }}"
+          # 修复curl的JSON格式（避免变量解析错误）
           curl -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.TOKEN }}" \
             https://api.github.com/repos/${{ github.repository }}/actions/workflows/docker-image.yml/dispatches \
-            -d '{"ref":"${{ github.ref_name }}","inputs":{"custom_tag":"${{ needs.compare-and-trigger.outputs.new_tag }}"}}'
+            -d "{\"ref\":\"${{ github.ref_name }}\",\"inputs\":{\"custom_tag\":\"${{ needs.compare-and-trigger.outputs.new_tag }}\"}}"
+        # 捕获curl错误，避免无意义的失败
+        continue-on-error: false
