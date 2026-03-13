@@ -98,5 +98,7 @@ jobs:
     if: needs.sync-and-extract.outputs.should_trigger == 'true'
     uses: ./.github/workflows/docker-image.yml
     with:
-      version: ${{ needs.sync-and-extract.outputs.extracted_tag }}
+      # 这里的 'tag' 参数名需要与 docker-image.yml 文件中 'on.workflow_call.inputs' 定义的参数名完全一致
+      # 如果 docker-image.yml 中定义的是 'image_version', 'app_version' 或其他名称，请相应修改
+      tag: ${{ needs.sync-and-extract.outputs.extracted_tag }}
     secrets: inherit
