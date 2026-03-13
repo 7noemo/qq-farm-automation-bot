@@ -1,114 +1,102 @@
-name: Sync Fork and Trigger Docker Build
+name: Sync Upstream and Trigger Docker Build
 
-# 触发规则：手动触发 + 每30分钟定时触发
 on:
-  workflow_dispatch:  # 手动触发（保留，方便临时执行）
   schedule:
-    - cron: '*/30 * * * *'  # 每30分钟触发一次（UTC时间）
+    - cron: '0 * * * *'  # 每小时一次 (UTC 时间)
+  workflow_dispatch:     # 允许手动触发测试
 
 jobs:
-  sync-fork:
+  sync-and-extract:
     runs-on: ubuntu-latest
     outputs:
-      version_tag: ${{ steps.ensure_outputs.outputs.final_version_tag }}
+      extracted_tag: ${{ steps.extract.outputs.tag }}
+      should_trigger: ${{ steps.check.outputs.should_trigger }}
     steps:
-      - name: Checkout Fork Repository
+      - name: Checkout your fork (main branch)
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
+          token: ${{ secrets.TOKEN }}
 
-      - name: Configure Git Identity
+      - name: Add upstream remote
         run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
+          git remote add upstream https://github.com/XyhTender/qq-farm-automation-bot.git || echo "Remote already exists"
+          git fetch upstream main
 
-      - name: Add Upstream Remote and Fetch
+      - name: Merge upstream changes (Preserve local files)
+        id: check
         run: |
-          git remote add upstream https://github.com/XyhTender/qq-farm-automation-bot.git
-          git fetch upstream
-
-      - name: Check if Sync is Needed
-        id: check_sync
-        run: |
-          LOCAL_COMMIT=$(git rev-parse HEAD)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          # 配置用户信息
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
-            echo "need_sync=true" >> $GITHUB_OUTPUT
-            echo "Sync is needed."
-          else
-            echo "need_sync=false" >> $GITHUB_OUTPUT
-            echo "No sync needed."
-          fi
-
-      - name: Exit if No Sync Needed
-        if: steps.check_sync.outputs.need_sync == 'false'
-        run: |
-          echo "Repository is up-to-date with upstream. Exiting."
-          exit 1
-
-      # 修复：在同步后检查是否有真正的变更
-      - name: Sync Code to Fork and Verify Change
-        run: |
-          git checkout main
-          git merge upstream/main --no-edit
-          
-          # 合并后，检查本地 HEAD 是否与上游一致
-          LOCAL_AFTER_MERGE=$(git rev-parse HEAD)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
-          
-          if [ "$LOCAL_AFTER_MERGE" = "$UPSTREAM_COMMIT" ]; then
-            # 如果合并后，本地 HEAD 与上游一致，说明确实发生了同步更新
-            echo "Merge successful. Pushing changes..."
-            git push origin main
-          else
-            # 如果合并后，本地 HEAD 与上游 still 不一致，说明合并可能有问题
-            # 或者，如果在合并前就一致（即 no-op merge），也会走到这里
-            # 这种情况下，我们认为同步失败或没有变化，应该退出
-            echo "Local HEAD ($LOCAL_AFTER_MERGE) does not match upstream HEAD ($UPSTREAM_COMMIT) after merge, or no-op merge occurred."
-            echo "This indicates no new commits were brought in from upstream."
-            exit 1
-          fi
-
-      - name: Extract Version from Update.log
-        id: extract_version
-        run: |
-          if [ -f "Update.log" ]; then
-            echo "Update.log found. Attempting to extract version..."
-            FIRST_LINE=$(head -n 1 Update.log)
-            VERSION_TAG=$(echo "$FIRST_LINE" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | sed 's/\//-/g')
-            if [ -n "$VERSION_TAG" ]; then
-              echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
-              echo "Extracted version tag: $VERSION_TAG"
+          # 尝试合并 upstream/main 到当前 main
+          # --no-edit 使用默认合并信息
+          if git merge upstream/main --no-edit; then
+            echo "✅ Merge successful! Local files preserved."
+            
+            # 检查是否真的发生了新的合并
+            # 如果 HEAD 变了，说明有更新
+            LOCAL=$(git rev-parse HEAD)
+            ORIG_HEAD=$(git rev-parse ORIG_HEAD 2>/dev/null || echo "")
+            
+            # 简单的判断：如果 merge 成功且没有提示 "Already up to date" (git merge 成功返回 0，但如果没有变化通常不会创建新 commit)
+            # 更稳妥的方式是检查 git log 是否有新的 merge commit
+            LAST_MSG=$(git log -1 --pretty=%B)
+            
+            if [[ "$LAST_MSG" == *"Merge"* ]]; then
+               echo "Changes detected after merge."
+               echo "should_trigger=true" >> $GITHUB_OUTPUT
+               
+               # 推送合并后的结果
+               git config --global http.extraHeader "Authorization: Bearer ${{ secrets.TOKEN }}"
+               # 请务必将下方的 'your-fork-owner' 和 'your-repository-name' 替换为您自己的仓库地址
+               git remote set-url origin https://github.com/7noemo/qq-farm-automation-bot.git
+               git push origin main
+               echo "✅ Pushed merged changes to origin."
             else
-              echo "Could not find a valid date format in Update.log." >&2
-              exit 1
+               echo "No new commits to merge (already up to date)."
+               echo "should_trigger=false" >> $GITHUB_OUTPUT
             fi
           else
-            echo "Update.log not found in this commit." >&2
+            echo "❌ Merge conflict detected!"
+            echo "Automatic merge failed. Please resolve conflicts manually."
+            echo "should_trigger=false" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-      - name: Ensure Final Outputs
-        id: ensure_outputs
+      - name: Extract date from Update.log as version tag
+        id: extract
+        if: steps.check.outputs.should_trigger == 'true'
         run: |
-          EXTRACTED_VERSION="${{ steps.extract_version.outputs.version_tag }}"
-          echo "Final version tag to pass: $EXTRACTED_VERSION"
-          echo "final_version_tag=$EXTRACTED_VERSION" >> $GITHUB_OUTPUT
+          # 确认 Update.log 文件位置，根据实际情况调整，此处假设在项目根目录
+          LOG_FILE="Update.log"
+          if [ ! -f "$LOG_FILE" ]; then
+             echo "ERROR: Update.log not found in the root directory."
+             exit 1
+          fi
+          
+          FIRST_LINE=$(head -n 1 "$LOG_FILE")
+          echo "First line of Update.log: $FIRST_LINE"
+          
+          # 提取 "YYYY/MM/DD" 格式的日期
+          DATE_RAW=$(echo "$FIRST_LINE" | grep -o '[0-9]\{4\}/[0-9]\{2\}/[0-9]\{2\}')
+          
+          if [ -z "$DATE_RAW" ]; then
+            echo "WARNING: Could not extract date from Update.log. Using 'latest'."
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          else
+            # 将 "YYYY/MM/DD" 转换为 "YYYY-MM-DD"
+            FORMATTED_DATE=$(echo "$DATE_RAW" | sed 's/\//\-/g')
+            echo "Extracted and formatted date: $FORMATTED_DATE"
+            echo "tag=$FORMATTED_DATE" >> $GITHUB_OUTPUT
+          fi
 
-  trigger-docker-build:
-    needs: sync-fork
-    if: ${{ needs.sync-fork.result == 'success' && needs.sync-fork.outputs.version_tag != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Docker Image Build Workflow
-        uses: benc-uk/workflow-dispatch@v1
-        with:
-          workflow: docker-image.yml
-          ref: main
-          inputs: |
-            {
-              "version_tag": "${{ needs.sync-fork.outputs.version_tag }}"
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
+  trigger-docker:
+    needs: sync-and-extract
+    if: needs.sync-and-extract.outputs.should_trigger == 'true'
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      version: ${{ needs.sync-and-extract.outputs.extracted_tag }}
+    secrets: inherit
