@@ -51,8 +51,7 @@ jobs:
                
                # 推送合并后的结果
                git config --global http.extraHeader "Authorization: Bearer ${{ secrets.TOKEN }}"
-               # 请务必将下方的 'your-fork-owner' 和 'your-repository-name' 替换为您自己的仓库地址
-               git remote set-url origin https://github.com/your-fork-owner/your-repository-name.git
+               git remote set-url origin https://github.com/7noemo/qq-farm-automation-bot.git
                git push origin main
                echo "✅ Pushed merged changes to origin."
             else
