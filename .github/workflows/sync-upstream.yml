@@ -50,9 +50,8 @@ jobs:
                echo "should_trigger=true" >> $GITHUB_OUTPUT
                
                # 推送合并后的结果
-               git config --global http.extraHeader "Authorization: Bearer ${{ secrets.TOKEN }}"
-               git remote set-url origin https://github.com/7noemo/qq-farm-automation-bot.git
-               git push origin main
+               # 使用 token 直接构建 URL 进行推送，避免配置全局 header 的问题
+               git push "https://${{ secrets.TOKEN }}@github.com/7noemo/qq-farm-automation-bot.git" main
                echo "✅ Pushed merged changes to origin."
             else
                echo "No new commits to merge (already up to date)."
