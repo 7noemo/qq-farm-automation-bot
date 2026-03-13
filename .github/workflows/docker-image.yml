@@ -59,7 +59,7 @@ jobs:
           
           # 2. 构建标签列表
           # 包含 主版本号, latest (仅当有自定义标签或为手动触发时), 和 git short sha
-          TAGS="${IMAGE_NAME}:${VERSION},${IMAGE_NAME}:sha-${GITHUB_SHA::7}"
+          TAGS="${IMAGE_NAME}:${VERSION}"
           
           # 如果是手动触发或有自定义标签，则也推送 latest 标签
           if [[ -n "${{ inputs.version_tag }}" ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
