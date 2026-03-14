@@ -32,33 +32,24 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           # 尝试合并 upstream/main 到当前 main
-          # --no-edit 使用默认合并信息
           if git merge upstream/main --no-edit; then
             echo "✅ Merge successful! Local files preserved."
             
-            # 检查是否真的发生了新的合并
-            # 如果 HEAD 变了，说明有更新
-            LOCAL=$(git rev-parse HEAD)
-            ORIG_HEAD=$(git rev-parse ORIG_HEAD 2>/dev/null || echo "")
-            
-            # 简单的判断：如果 merge 成功且没有提示 "Already up to date" (git merge 成功返回 0，但如果没有变化通常不会创建新 commit)
-            # 更稳妥的方式是检查 git log 是否有新的 merge commit
+            # 检查是否生成了新的 merge commit
             LAST_MSG=$(git log -1 --pretty=%B)
-            
-            if [[ "$LAST_MSG" == *"Merge"* ]]; then
-               echo "Changes detected after merge."
-               echo "should_trigger=true" >> $GITHUB_OUTPUT
-               
-               # 推送合并后的结果
-               # 使用 token 直接构建 URL 进行推送，避免配置全局 header 的问题
-               git push "https://${{ secrets.TOKEN }}@github.com/7noemo/qq-farm-automation-bot.git" main
-               echo "✅ Pushed merged changes to origin."
+            if [[ "$LAST_MSG" == *"Merge branch"* || "$LAST_MSG" == *"Merge remote-tracking branch"* ]]; then
+              echo "Changes detected after merge."
+              echo "should_trigger=true" >> $GITHUB_OUTPUT
+              
+              # 使用 token 直接推送（更可靠）
+              git push "https://${{ secrets.TOKEN }}@github.com/7noemo/qq-farm-automation-bot.git" main
+              echo "✅ Pushed merged changes to origin."
             else
-               echo "No new commits to merge (already up to date)."
-               echo "should_trigger=false" >> $GITHUB_OUTPUT
+              echo "No new commits to merge (already up to date)."
+              echo "should_trigger=false" >> $GITHUB_OUTPUT
             fi
           else
-            echo "❌ Merge conflict detected!"
+            echo "❌ Merge conflict or error occurred!"
             echo "Automatic merge failed. Please resolve conflicts manually."
             echo "should_trigger=false" >> $GITHUB_OUTPUT
             exit 1
@@ -68,24 +59,28 @@ jobs:
         id: extract
         if: steps.check.outputs.should_trigger == 'true'
         run: |
-          # 确认 Update.log 文件位置，根据实际情况调整，此处假设在项目根目录
           LOG_FILE="Update.log"
           if [ ! -f "$LOG_FILE" ]; then
-             echo "ERROR: Update.log not found in the root directory."
-             exit 1
+            # 尝试在 core/ 目录下查找（兼容不同项目结构）
+            if [ -f "./core/Update.log" ]; then
+              LOG_FILE="./core/Update.log"
+            else
+              echo "ERROR: Update.log not found in root or ./core/"
+              exit 1
+            fi
           fi
           
           FIRST_LINE=$(head -n 1 "$LOG_FILE")
           echo "First line of Update.log: $FIRST_LINE"
           
-          # 提取 "YYYY/MM/DD" 格式的日期
+          # 提取 YYYY/MM/DD 格式的日期
           DATE_RAW=$(echo "$FIRST_LINE" | grep -o '[0-9]\{4\}/[0-9]\{2\}/[0-9]\{2\}')
           
           if [ -z "$DATE_RAW" ]; then
             echo "WARNING: Could not extract date from Update.log. Using 'latest'."
             echo "tag=latest" >> $GITHUB_OUTPUT
           else
-            # 将 "YYYY/MM/DD" 转换为 "YYYY-MM-DD"
+            # 转换为 YYYY-MM-DD
             FORMATTED_DATE=$(echo "$DATE_RAW" | sed 's/\//\-/g')
             echo "Extracted and formatted date: $FORMATTED_DATE"
             echo "tag=$FORMATTED_DATE" >> $GITHUB_OUTPUT
@@ -96,6 +91,5 @@ jobs:
     if: needs.sync-and-extract.outputs.should_trigger == 'true'
     uses: ./.github/workflows/docker-image.yml
     with:
-      # 此处的 'version_tag' 必须与 docker-image.yml 中 workflow_call.inputs 下定义的名称完全一致
       version_tag: ${{ needs.sync-and-extract.outputs.extracted_tag }}
     secrets: inherit
