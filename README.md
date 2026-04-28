@@ -1,10 +1,8 @@
 # QQ 农场多账号挂机 + Web 面板
 - 基于 Node.js 的 QQ 农场自动化工具，支持多账号管理、Web 控制面板、实时日志与数据分析。
-- 基于[Penty-d/qq-farm-bot-ui](https://github.com/Penty-d/qq-farm-bot-ui)项目二开
 - 更新优化日志详见update.log 感谢支持，喜欢的点一个star⭐吧！
 - 默认账号密码都是admin，端口3007，请部署登录后尽快修改密码！
-# 不要再用开源版本了，用就死，上号三秒啥都不干一样下次封你七天起步。
-其他相关问题联系QQ1503938233
+- 最近完整更新日志详见：[更新日志](https://gitee.com/xlzcandy/qq-classic-farm-update-log/blob/master/README.md)
 ---
 
 **功能截图**
