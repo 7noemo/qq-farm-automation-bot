@@ -5,7 +5,7 @@
 - 更新优化日志详见update.log 感谢支持，喜欢的点一个star⭐吧！
 - 默认账号密码都是admin，端口3007，请部署登录后尽快修改密码！
 - 重构版完整更新日志详见：[更新日志](https://gitee.com/xlzcandy/qq-classic-farm-update-log/blob/master/README.md)
-## 开源版停止维护，所有功能都是正常使用的，只需要更新一下core/src/config/config.js里面的版本号即可，开源版本请自行解决各种部署问题、使用问题等，感谢各位支持！
+## 开源版停止维护，但是请不要贩卖开源版本，免费项目，禁止倒卖！所有功能都是正常使用的，只需要更新一下core/src/config/config.js里面的版本号即可，开源版本请自行解决各种部署问题、使用问题等，感谢各位支持！
 ---
 ## 技术栈
 
